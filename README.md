@@ -1,3 +1,5 @@
+<img src="assets/icon.png" alt="" width="96" align="right">
+
 # Spoolman Filaments for OrcaSlicer
 
 An OrcaSlicer plugin that keeps one filament profile per

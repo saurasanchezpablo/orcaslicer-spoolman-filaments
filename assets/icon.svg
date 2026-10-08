@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f766e"/>
+      <stop offset="1" stop-color="#134e4a"/>
+    </linearGradient>
+    <marker id="head" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="4.2" markerHeight="4.2" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#fbbf24"/>
+    </marker>
+  </defs>
+  <rect width="512" height="512" rx="104" fill="url(#bg)"/>
+  <!-- spool: flange, filament windings, hub -->
+  <circle cx="256" cy="256" r="150" fill="#e2e8f0"/>
+  <circle cx="256" cy="256" r="128" fill="#f97316"/>
+  <g fill="none" stroke="#ea580c" stroke-width="6" opacity="0.9">
+    <circle cx="256" cy="256" r="112"/>
+    <circle cx="256" cy="256" r="96"/>
+    <circle cx="256" cy="256" r="80"/>
+  </g>
+  <circle cx="256" cy="256" r="62" fill="#e2e8f0"/>
+  <circle cx="256" cy="256" r="26" fill="#134e4a"/>
+  <!-- two-way sync arrows around the spool -->
+  <g fill="none" stroke="#fbbf24" stroke-width="20" stroke-linecap="round">
+    <path d="M 98 214 A 165 165 0 0 1 380 128" marker-end="url(#head)"/>
+    <path d="M 414 298 A 165 165 0 0 1 132 384" marker-end="url(#head)"/>
+  </g>
+</svg>

@@ -231,7 +231,7 @@ class OrcaCloud(Base):
         self.syncer().sync()
         self.spoolman.spools[1]["archived"] = True
         self.syncer().sync()
-        (self.profiles / f"{self.NAME}.json").write_text("{}")
+        (self.profiles / f"{self.NAME}.json").write_text('{"filament_id": "SPOOLMAN_2"}')
         self.assertEqual(self.syncer().sync().removed, [self.NAME])
         self.assertEqual(self.syncer().sync().removed, [])
 
@@ -243,6 +243,41 @@ class OrcaCloud(Base):
         new = self.profiles / "Geeetech PLA Marble Grey [Spoolman 2]"
         self.assertFalse((self.profiles / f"{self.NAME}.json").exists())
         self.assertEqual(sf.read_info(new.with_suffix(".info"))["setting_id"], "PCLOUD")
+
+
+class Security(Base):
+    def test_only_known_settings_are_taken_from_spoolman(self):
+        self.spoolman.spools[1]["filament"]["extra"].update({
+            "orca_filament_start_gcode": '"M104 S300"', "orca_filament_id": '"X"', "orca_inherits": '"Y"'})
+        self.syncer().sync()
+        p = self.profile("Geeetech PLA Marble [Spoolman 2]")
+        self.assertEqual(p["filament_start_gcode"], '"; Filament gcode\\n"')
+        self.assertEqual(p["filament_id"], "SPOOLMAN_2")
+        self.assertEqual(p["inherits"], "")
+
+    def test_hostile_names_stay_in_the_profile_folder(self):
+        for hostile in ("..\\..\\evil", "../../evil", "a:b*c?<d>|e", "x\x00y\nz", "...", ""):
+            name = sf.profile_name({"id": 5, "name": hostile, "vendor": {"name": ""}})
+            self.assertNotRegex(name, r'[\\/:*?"<>|\x00-\x1f]')
+            path = sf.profile_path(self.profiles, name)
+            self.assertEqual(path.parent, self.profiles)
+        with self.assertRaises(sf.SpoolmanError):
+            sf.profile_path(self.profiles, "../escape")
+
+    def test_users_own_profile_with_the_same_name_is_left_alone(self):
+        self.profiles.mkdir(parents=True)
+        mine = self.profiles / "Geeetech PLA Marble [Spoolman 2].json"
+        mine.write_text('{"name": "mine", "inherits": "Generic PLA @System"}')
+        report = self.syncer().sync()
+        self.assertEqual(json.loads(mine.read_text())["name"], "mine")
+        self.assertTrue(any("not a Spoolman Filaments profile" in e for e in report.errors))
+
+    def test_credentials_are_sent_but_never_shown(self):
+        client = sf.Spoolman("https://me:s3cret@spoolman.test:7912")
+        self.assertEqual(client.display_url, "https://spoolman.test:7912")
+        with self.assertRaises(sf.SpoolmanError) as ctx:
+            sf.Spoolman("http://me:s3cret@127.0.0.1:9", timeout=1).request("GET", "/api/v1/info")
+        self.assertNotIn("s3cret", str(ctx.exception))
 
 
 class Values(unittest.TestCase):

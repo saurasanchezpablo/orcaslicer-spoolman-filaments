@@ -4,7 +4,7 @@
 # name = "Spoolman Filaments"
 # description = "One filament profile per Spoolman filament, kept in sync with Spoolman both ways"
 # author = "Pablo Saura"
-# version = "0.1.0"
+# version = "0.1.1"
 # ///
 
 """Spoolman Filaments: one OrcaSlicer filament profile per Spoolman filament.
@@ -22,6 +22,7 @@ AFC lanes reported through Moonraker) pick these profiles by filament_id.
 
 from __future__ import annotations
 
+import base64
 import http.client
 import json
 import re
@@ -100,16 +101,22 @@ class SpoolmanError(RuntimeError):
 class Spoolman:
     def __init__(self, base_url: str, timeout: float = 10):
         self.base_url = normalize_url(base_url)
+        self.display_url = redact_url(self.base_url)
         self.timeout = timeout
 
     def request(self, method: str, path: str, body: Any = None) -> Any:
         parsed = urllib.parse.urlsplit(self.base_url + path)
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
-            raise SpoolmanError(f"Not an http(s) URL: {self.base_url}")
+            raise SpoolmanError(f"Not an http(s) URL: {self.display_url}")
+        # HTTPSConnection verifies the server certificate against the system CAs.
         conn_type = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
         conn = conn_type(parsed.hostname, parsed.port, timeout=self.timeout)
         target = urllib.parse.urlunsplit(("", "", parsed.path, parsed.query, ""))
         headers = {"Accept": "application/json"}
+        if parsed.username is not None:
+            # Credentials in the URL (https://user:pass@host) are sent as HTTP Basic auth.
+            userinfo = f"{urllib.parse.unquote(parsed.username)}:{urllib.parse.unquote(parsed.password or '')}"
+            headers["Authorization"] = "Basic " + base64.b64encode(userinfo.encode()).decode()
         data = None
         if body is not None:
             data = json.dumps(body).encode()
@@ -119,12 +126,16 @@ class Spoolman:
             resp = conn.getresponse()
             payload = resp.read()
         except OSError as exc:
-            raise SpoolmanError(f"Cannot reach Spoolman at {self.base_url}: {exc}") from exc
+            raise SpoolmanError(f"Cannot reach Spoolman at {self.display_url}: {exc}") from exc
         finally:
             conn.close()
         if resp.status >= 400:
-            raise SpoolmanError(f"Spoolman {method} {path}: HTTP {resp.status} {payload[:200]!r}")
-        return json.loads(payload) if payload else None
+            raise SpoolmanError(f"Spoolman {method} {path}: HTTP {resp.status}")
+        try:
+            return json.loads(payload) if payload else None
+        except ValueError as exc:
+            raise SpoolmanError(f"Spoolman {method} {path}: the reply is not JSON; is {self.display_url} "
+                                "the Spoolman address?") from exc
 
     def active_filaments(self) -> dict[int, dict]:
         """Filaments with at least one non-archived spool, keyed by filament id."""
@@ -163,6 +174,16 @@ def normalize_url(url: str) -> str:
     if url and "://" not in url:
         url = "http://" + url
     return url
+
+
+def redact_url(url: str) -> str:
+    """The URL without any user:password part, for messages and logs."""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.username is None and parsed.password is None:
+        return url
+    host = parsed.hostname or ""
+    netloc = f"{host}:{parsed.port}" if parsed.port else host
+    return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
 
 def decode_extra(value: Any) -> Any:
@@ -328,9 +349,11 @@ def profile_name(filament: dict) -> str:
     name = filament.get("name") or f"Filament {filament['id']}"
     if vendor and not name.lower().startswith(vendor.lower()):
         name = f"{vendor} {name}"
-    # '@' would make OrcaSlicer restrict the profile to the printer named after it.
-    name = name.replace("@", " ").replace("/", "-")
-    return f"{' '.join(name.split())} [Spoolman {filament['id']}]"
+    # '@' would make OrcaSlicer restrict the profile to the printer named after it. The name is
+    # also the file name: no path separators, reserved characters or control characters.
+    name = re.sub(r'[\\/:*?"<>|\x00-\x1f\x7f@]', " ", str(name))
+    name = " ".join(name.split()).strip(" .")[:80] or "Filament"
+    return f"{name} [Spoolman {int(filament['id'])}]"
 
 
 def generate(catalog: Catalog, filament: dict, version: str) -> tuple[dict, str]:
@@ -361,7 +384,9 @@ def generate(catalog: Catalog, filament: dict, version: str) -> tuple[dict, str]
             put(key, filament["settings_bed_temp"])
 
     for key, raw in (filament.get("extra") or {}).items():
-        if not key.startswith(EXTRA_PREFIX):
+        # Only the settings this plugin defines. Anyone who can edit Spoolman could otherwise put,
+        # say, start G-code into every print through an orca_filament_start_gcode field.
+        if not key.startswith(EXTRA_PREFIX) or key[len(EXTRA_PREFIX):] not in SYNCED_SETTINGS:
             continue
         value = decode_extra(raw)
         if isinstance(value, list):
@@ -436,6 +461,22 @@ def read_info(path: Path) -> dict[str, str]:
 def write_info(path: Path, info: dict[str, str]) -> None:
     keys = ["sync_info", "user_id", "setting_id", "base_id", "updated_time"]
     path.write_text("".join(f"{k} = {info.get(k, '')}\n" for k in keys))
+
+
+def profile_path(profile_dir: Path, name: str) -> Path:
+    """The file for a profile name, refusing anything that would land outside profile_dir."""
+    path = profile_dir / f"{name}.json"
+    if path.resolve().parent != profile_dir.resolve():
+        raise SpoolmanError(f"Refusing unsafe profile name {name!r}")
+    return path
+
+
+def is_ours(path: Path) -> bool:
+    """True when the file is missing or is a profile this plugin wrote (never a user's own profile)."""
+    if not path.exists():
+        return True
+    data = read_json(path)
+    return isinstance(data, dict) and str(data.get("filament_id", "")).startswith(FILAMENT_ID_PREFIX)
 
 
 def remove_profile(path: Path) -> None:
@@ -518,6 +559,8 @@ class Syncer:
                    report: Report) -> dict[str, str]:
         extra = {}
         for key in edits:
+            if key not in SYNCED_SETTINGS:
+                continue
             field_def = fields.get(EXTRA_PREFIX + key)
             encoded = encode_extra(field_def, existing[key]) if field_def else None
             if encoded is not None:
@@ -540,12 +583,16 @@ class Syncer:
 
         new_state: dict[str, dict] = {}
         for fid, filament in sorted(filaments.items()):
-            name = profile_name(filament)
-            path = self.profile_dir / f"{name}.json"
             previous = state.get(str(fid), {})
-            old_path = self.profile_dir / f"{previous['name']}.json" if previous.get("name") else path
-            existing = read_json(old_path)
             try:
+                name = profile_name(filament)
+                path = profile_path(self.profile_dir, name)
+                old_path = profile_path(self.profile_dir, previous["name"]) if previous.get("name") else path
+                for target in {path, old_path}:
+                    if not is_ours(target):
+                        raise SpoolmanError(f"{target.name} is not a Spoolman Filaments profile; "
+                                            "rename it to let the plugin manage this filament")
+                existing = read_json(old_path)
                 desired, parent = generate(self.catalog, filament, self.version)
                 edits = find_edits(existing, previous.get("generated"))
                 pushed = self.push_edits(fid, existing, edits, fields, report) if edits else {}
@@ -567,8 +614,11 @@ class Syncer:
         for fid, previous in state.items():
             if fid in new_state:
                 continue
-            path = self.profile_dir / f"{previous['name']}.json"
-            if path.exists():
+            try:
+                path = profile_path(self.profile_dir, previous["name"])
+            except (SpoolmanError, KeyError):
+                continue
+            if path.exists() and is_ours(path):
                 remove_profile(path)
                 report.removed.append(previous["name"])
                 # Keep watching it: OrcaSlicer may write it back once from memory before restarting.
@@ -584,7 +634,7 @@ class Syncer:
         for fid, entry in state.items():
             if entry.get("name") != preset_name or entry.get("removed"):
                 continue
-            existing = read_json(self.profile_dir / f"{preset_name}.json")
+            existing = read_json(profile_path(self.profile_dir, preset_name))
             edits = find_edits(existing, entry.get("generated"))
             if not edits:
                 return report
